@@ -26,26 +26,6 @@ variable "destination_cidr_block" {
   description = "Destination public cidr"
 }
 
-variable "DB_NAME" {
-  description = "DB name"
-}
-
-variable "DB_USER" {
-  description = "DB username"
-}
-
-variable "DB_PASSWORD" {
-  description = "DB password"
-}
-
-variable "DB_HOST" {
-  description = "DB host"
-}
-
-variable "DB_PORT" {
-  description = "DB port"
-}
-
 variable "ami" {
   description = "AMI"
 }
@@ -64,4 +44,23 @@ variable "instance_vol_size" {
 
 variable "key_name" {
   description = "Name of ssh key"
+}
+
+variable "port" {
+  description = "App port"
+}
+
+variable "database_username" {
+  description = "The username of the database"
+}
+
+variable "database_password" {
+  description = "The password of the database"
+}
+variable "database_name" {
+  description = "The name of the database"
+}
+
+variable "db_identifier" {
+  description = "The identifier of the database"
 }
