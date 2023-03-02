@@ -87,7 +87,7 @@ resource "aws_route" "public_route" {
 resource "aws_security_group" "application_sg" {
   name        = "application-sg"
   description = "Security group for EC2 instance with web application"
-  vpc_id = aws_vpc.my_vpc.id
+  vpc_id      = aws_vpc.my_vpc.id
   depends_on  = [aws_vpc.my_vpc]
 
   ingress {
@@ -111,8 +111,8 @@ resource "aws_security_group" "application_sg" {
 
   ingress {
     protocol    = "tcp"
-    from_port   = var.DB_PORT
-    to_port     = var.DB_PORT
+    from_port   = "3000"
+    to_port     = "3000"
     cidr_blocks = ["0.0.0.0/0"]
   }
   egress {
@@ -129,27 +129,174 @@ resource "aws_security_group" "application_sg" {
 # Create EC2 instance
 
 resource "aws_instance" "ec2" {
-  ami                  = var.ami
-  instance_type        = var.instance_type
-  subnet_id            = aws_subnet.public_subnet[0].id
-  key_name             = var.key_name
-  security_groups      = [aws_security_group.application_sg.id]
+  ami                     = var.ami
+  instance_type           = var.instance_type
+  subnet_id               = aws_subnet.public_subnet[0].id
+  key_name                = var.key_name
+  security_groups         = [aws_security_group.application_sg.id]
   disable_api_termination = false
+  iam_instance_profile    = aws_iam_instance_profile.app_instance_profile.name
   ebs_block_device {
     device_name           = "/dev/xvda"
     volume_type           = var.instance_vol_type
     volume_size           = var.instance_vol_size
     delete_on_termination = true
   }
-    user_data = <<EOF
+  #   code for the user data
+  user_data = <<EOF
+
 #!/bin/bash
-echo export DB_NAME=${var.DB_NAME} >> /etc/environment
-echo export DB_USER=${var.DB_USER} >> /etc/environment
-echo export DB_PASSWORD=${var.DB_PASSWORD} >> /etc/environment
-echo export DB_HOST="${var.DB_HOST} >> /etc/environment
-echo export DB_PORT=${var.DB_PORT} >> /etc/environment
-EOF
-tags = {
+
+echo "export DB_USER=${var.database_username} " >> /home/ec2-user/webapp/.env
+echo "export DB_PASSWORD=${var.database_password} " >> /home/ec2-user/webapp/.env
+echo "export DB_PORT=${var.port} " >> /home/ec2-user/webapp/.env
+echo "export DB_HOST=$(echo ${aws_db_instance.db_instance.endpoint} | cut -d: -f1)" >> /home/ec2-user/webapp/.env
+echo "export DB_NAME=${var.database_name} " >> /home/ec2-user/webapp/.env
+echo "export BUCKET_NAME=${aws_s3_bucket.mybucket.bucket} " >> /home/ec2-user/webapp/.env
+echo "export BUCKET_REGION=${var.region} " >> /home/ec2-user/webapp/.env
+sudo chmod +x setenv.sh
+sh setenv.sh
+
+ EOF
+
+  tags = {
     "Name" = "ec2"
+  }
+}
+
+#Create database security group
+resource "aws_security_group" "database" {
+  name        = "database"
+  description = "Security group for RDS instance for database"
+  vpc_id      = aws_vpc.my_vpc.id
+  ingress {
+    protocol        = "tcp"
+    from_port       = "3306"
+    to_port         = "3306"
+    security_groups = [aws_security_group.application_sg.id]
+  }
+
+  tags = {
+    "Name" = "database-sg"
+  }
+}
+
+
+resource "random_id" "id" {
+  byte_length = 8
+}
+#Create s3 bucket
+resource "aws_s3_bucket" "mybucket" {
+  bucket        = "mywebappbucket-${random_id.id.hex}"
+  acl           = "private"
+  force_destroy = true
+  lifecycle_rule {
+    id      = "StorageTransitionRule"
+    enabled = true
+    transition {
+      days          = 30
+      storage_class = "STANDARD_IA"
+    }
+  }
+  server_side_encryption_configuration {
+    rule {
+      apply_server_side_encryption_by_default {
+        sse_algorithm = "AES256"
+      }
+    }
+  }
+
+}
+
+#Create iam policy to accress s3
+resource "aws_iam_policy" "WebAppS3_policy" {
+  name = "WebAppS3"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+        ]
+        Resource = "arn:aws:s3:::${aws_s3_bucket.mybucket.bucket}/*"
+        Resource = "arn:aws:s3:::${aws_s3_bucket.mybucket.bucket}/*"
+      }
+    ]
+  })
+}
+
+#Create iam role for ec2 to access s3
+resource "aws_iam_role" "WebAppS3_role" {
+  name = "EC2-CSYE6225"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+#Create iam role policy attachment
+resource "aws_iam_role_policy_attachment" "WebAppS3_role_policy_attachment" {
+  role       = aws_iam_role.WebAppS3_role.name
+  policy_arn = aws_iam_policy.WebAppS3_policy.arn
+}
+
+#attach iam role to ec2 instance
+resource "aws_iam_instance_profile" "app_instance_profile" {
+  name = "app_instance_profile"
+  role = aws_iam_role.WebAppS3_role.name
+}
+
+#Create Rds subnet group
+resource "aws_db_subnet_group" "db_subnet_group" {
+  name        = "db_subnet_group"
+  description = "RDS subnet group for database"
+  subnet_ids  = aws_subnet.private_subnet.*.id
+  tags = {
+    Name = "db_subnet_group"
+  }
+}
+
+#Create Rds parameter group
+resource "aws_db_parameter_group" "db_parameter_group" {
+  name        = "db-parameter-group"
+  family      = "mysql8.0"
+  description = "RDS parameter group for database"
+  parameter {
+    name  = "character_set_server"
+    value = "utf8"
+  }
+}
+
+#Create Rds instance
+resource "aws_db_instance" "db_instance" {
+  identifier                = var.db_identifier
+  engine                    = "mysql"
+  engine_version            = "8.0.28"
+  instance_class            = "db.t3.micro"
+  name                      = var.database_name
+  username                  = var.database_username
+  password                  = var.database_password
+  parameter_group_name      = aws_db_parameter_group.db_parameter_group.name
+  allocated_storage         = 20
+  storage_type              = "gp2"
+  multi_az                  = false
+  skip_final_snapshot       = true
+  final_snapshot_identifier = "final-snapshot"
+  publicly_accessible       = false
+  db_subnet_group_name      = aws_db_subnet_group.db_subnet_group.name
+  vpc_security_group_ids    = [aws_security_group.database.id]
+  tags = {
+    Name = "db_instance"
   }
 }
