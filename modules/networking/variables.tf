@@ -64,3 +64,7 @@ variable "database_name" {
 variable "db_identifier" {
   description = "The identifier of the database"
 }
+
+variable "root_domain" {
+  description = "Root domain"
+}
