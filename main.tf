@@ -18,6 +18,7 @@ module "mynetwork" {
   database_password      = var.database_password
   database_name          = var.database_name
   db_identifier          = var.db_identifier
+  root_domain            = var.root_domain
 }
 locals {
   production_availability_zones = ["${var.region}a", "${var.region}b", "${var.region}c"]

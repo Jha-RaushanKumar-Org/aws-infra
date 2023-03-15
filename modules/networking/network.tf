@@ -300,3 +300,18 @@ resource "aws_db_instance" "db_instance" {
     Name = "db_instance"
   }
 }
+
+#Fetch Hosted Zone
+
+data "aws_route53_zone" "hosted_zone" {
+  name = "${var.profile}.${var.root_domain}"
+}
+
+# Create Record
+resource "aws_route53_record" "app_record" {
+  zone_id = data.aws_route53_zone.hosted_zone.zone_id
+  name    = "${var.profile}.${var.root_domain}"
+  type    = "A"
+  ttl     = "60"
+  records = [aws_instance.ec2.public_ip]
+}
