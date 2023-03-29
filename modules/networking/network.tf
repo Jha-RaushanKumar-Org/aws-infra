@@ -154,9 +154,14 @@ echo "export DB_HOST=$(echo ${aws_db_instance.db_instance.endpoint} | cut -d: -f
 echo "export DB_NAME=${var.database_name} " >> /home/ec2-user/webapp/.env
 echo "export BUCKET_NAME=${aws_s3_bucket.mybucket.bucket} " >> /home/ec2-user/webapp/.env
 echo "export BUCKET_REGION=${var.region} " >> /home/ec2-user/webapp/.env
+sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+-a fetch-config \
+-m ec2 \
+-c file:/home/ec2-user/webapp/packer/cloudwatch-config.json \
+-s
 sudo chmod +x setenv.sh
 sh setenv.sh
-
+sudo systemctl restart webapp.service
  EOF
 
   tags = {
@@ -314,4 +319,11 @@ resource "aws_route53_record" "app_record" {
   type    = "A"
   ttl     = "60"
   records = [aws_instance.ec2.public_ip]
+}
+
+# cloudwatch_policy attached to ec2 role
+
+resource "aws_iam_role_policy_attachment" "cloudwatch_policy" {
+  role       = aws_iam_role.WebAppS3_role.name
+  policy_arn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"
 }
