@@ -19,6 +19,7 @@ module "mynetwork" {
   database_name          = var.database_name
   db_identifier          = var.db_identifier
   root_domain            = var.root_domain
+  aws_account_number     = var.aws_account_number
 }
 locals {
   production_availability_zones = ["${var.region}a", "${var.region}b", "${var.region}c"]

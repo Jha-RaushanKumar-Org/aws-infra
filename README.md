@@ -24,3 +24,9 @@ Run these commands:
 `terraform apply` - Creation of networking resources
 
 `terraform destroy` - Cleanup of networking resources
+
+
+##  Command for importing the certificate 
+
+
+aws acm import-certificate  --certificate fileb://`path_of_crt` --private-key fileb://`path_of_private_key` --certificate-chain fileb://`path_of_ca_bundle` --profile prod 
