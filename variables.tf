@@ -63,3 +63,7 @@ variable "db_identifier" {
 variable "root_domain" {
   description = "Root domain"
 }
+
+variable "aws_account_number" {
+  description = "AWS account number"
+}

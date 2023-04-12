@@ -309,6 +309,10 @@ resource "aws_db_instance" "db_instance" {
   publicly_accessible       = false
   db_subnet_group_name      = aws_db_subnet_group.db_subnet_group.name
   vpc_security_group_ids    = [aws_security_group.database.id]
+  storage_encrypted         = true
+  kms_key_id                = aws_kms_key.rds_key.arn
+
+
   tags = {
     Name = "db_instance"
   }
@@ -376,53 +380,65 @@ resource "aws_security_group" "loadbalancer_sg" {
 
 # Launch Configuration
 
-resource "aws_launch_configuration" "asg_launch_config" {
-  name                        = "asg_launch_config"
-  image_id                    = var.ami
-  instance_type               = var.instance_type
-  key_name                    = var.key_name
-  associate_public_ip_address = true
-  iam_instance_profile        = aws_iam_instance_profile.app_instance_profile.name
-  security_groups             = [aws_security_group.application_sg.id]
-
-  root_block_device {
-    volume_type = var.instance_vol_type
-    volume_size = var.instance_vol_size
+resource "aws_launch_template" "my_template" {
+  name          = "my_template"
+  image_id      = var.ami
+  instance_type = var.instance_type
+  key_name      = var.key_name
+  network_interfaces {
+    associate_public_ip_address = true
+    security_groups             = [aws_security_group.application_sg.id]
   }
 
-  user_data = <<EOF
-#!/bin/bash
-echo "export DB_USER=${var.database_username} " >> /home/ec2-user/webapp/.env
-echo "export DB_PASSWORD=${var.database_password} " >> /home/ec2-user/webapp/.env
-echo "export DB_PORT=${var.port} " >> /home/ec2-user/webapp/.env
-echo "export DB_HOST=$(echo ${aws_db_instance.db_instance.endpoint} | cut -d: -f1)" >> /home/ec2-user/webapp/.env
-echo "export DB_NAME=${var.database_name} " >> /home/ec2-user/webapp/.env
-echo "export BUCKET_NAME=${aws_s3_bucket.mybucket.bucket} " >> /home/ec2-user/webapp/.env
-echo "export BUCKET_REGION=${var.region} " >> /home/ec2-user/webapp/.env
-sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
--a fetch-config \
--m ec2 \
--c file:/home/ec2-user/webapp/packer/cloudwatch-config.json \
--s
-sudo chmod +x setenv.sh
-sh setenv.sh
-sudo systemctl restart webapp.service
- EOF
+  block_device_mappings {
+    device_name = "/dev/xvda"
 
+    ebs {
+      volume_type           = var.instance_vol_type
+      volume_size           = var.instance_vol_size
+      delete_on_termination = true
+      encrypted             = true
+      kms_key_id            = aws_kms_key.ebs_key.arn
+    }
+  }
+  iam_instance_profile {
+    name = aws_iam_instance_profile.app_instance_profile.name
+  }
   lifecycle {
     create_before_destroy = true
   }
+  user_data = base64encode(
+    <<-EOF
+    #!/bin/bash
+    echo "export DB_USER=${var.database_username} " >> /home/ec2-user/webapp/.env
+		echo "export DB_PASSWORD=${var.database_password} " >> /home/ec2-user/webapp/.env
+		echo "export DB_PORT=${var.port} " >> /home/ec2-user/webapp/.env
+		echo "export DB_HOST=$(echo ${aws_db_instance.db_instance.endpoint} | cut -d: -f1)" >> /home/ec2-user/webapp/.env
+		echo "export DB_NAME=${var.database_name} " >> /home/ec2-user/webapp/.env
+		echo "export BUCKET_NAME=${aws_s3_bucket.mybucket.bucket} " >> /home/ec2-user/webapp/.env
+		echo "export BUCKET_REGION=${var.region} " >> /home/ec2-user/webapp/.env
+		sudo /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl \
+		-a fetch-config \
+		-m ec2 \
+		-c file:/home/ec2-user/webapp/packer/cloudwatch-config.json \
+		-s
+		sudo chmod +x setenv.sh
+		sh setenv.sh
+		sudo systemctl restart webapp.service
+EOF
+  )
 
 }
 
 # Target groups
 
 resource "aws_lb_target_group" "lb_tg" {
-  name        = "lb-tg"
-  port        = 3000
-  protocol    = "HTTP"
-  target_type = "instance"
-  vpc_id      = aws_vpc.my_vpc.id
+  name                 = "lb-tg"
+  port                 = 3000
+  protocol             = "HTTP"
+  target_type          = "instance"
+  vpc_id               = aws_vpc.my_vpc.id
+  deregistration_delay = 30
 
   health_check {
     path    = "/healthz"
@@ -432,20 +448,23 @@ resource "aws_lb_target_group" "lb_tg" {
 
 # Auto Scaling Group
 resource "aws_autoscaling_group" "autoscaling_group" {
-  name                 = "autoscaling_group"
-  default_cooldown     = 60
-  launch_configuration = aws_launch_configuration.asg_launch_config.name
-  min_size             = 1
-  max_size             = 3
-  desired_capacity     = 1
-  vpc_zone_identifier  = aws_subnet.public_subnet.*.id
-  target_group_arns    = [aws_lb_target_group.lb_tg.arn]
+  name             = "autoscaling_group"
+  default_cooldown = 60
+  launch_template {
+    id      = aws_launch_template.my_template.id
+    version = "$Latest"
+  }
+  min_size            = 1
+  max_size            = 3
+  desired_capacity    = 1
+  vpc_zone_identifier = aws_subnet.public_subnet.*.id
+  target_group_arns   = [aws_lb_target_group.lb_tg.arn]
 
   health_check_type = "EC2"
 
   tag {
     key                 = "Name"
-    value               = "autoscaling_group"
+    value               = "ec2"
     propagate_at_launch = true
   }
 }
@@ -553,16 +572,157 @@ resource "aws_lb" "app_lb" {
     "Name" = "app_lb"
   }
 }
+# ACM Cerificate
+
+data "aws_acm_certificate" "ssl_certificate" {
+  domain   = "${var.profile}.${var.root_domain}"
+  types = ["IMPORTED"] #AMAZON_ISSUED for dev and IMPORTED for prod
+  statuses = ["ISSUED"]
+}
 
 # Load balancer listener
 
 resource "aws_lb_listener" "loadbalancer_listener" {
   load_balancer_arn = aws_lb.app_lb.arn
-  port              = 80
-  protocol          = "HTTP"
+  port              = 443
+  protocol          = "HTTPS"
+  certificate_arn   = data.aws_acm_certificate.ssl_certificate.arn
 
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.lb_tg.arn
   }
+}
+
+resource "aws_kms_key" "ebs_key" {
+  description             = " A symmetric KMS key for EBS"
+  deletion_window_in_days = 10
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "Allow IAM user permissions"
+        Effect = "Allow"
+        Principal = {
+          AWS = [
+            "arn:aws:iam::${var.aws_account_number}:root",
+          ]
+        }
+        Action   = "kms:*"
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow access for Key Administrators"
+        Effect = "Allow"
+        Principal = {
+          AWS = [
+            "arn:aws:iam::${var.aws_account_number}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling",
+          ]
+        }
+        Action = [
+          "kms:Create*",
+          "kms:Describe*",
+          "kms:Enable*",
+          "kms:List*",
+          "kms:Put*",
+          "kms:Update*",
+          "kms:Revoke*",
+          "kms:Disable*",
+          "kms:Get*",
+          "kms:Delete*",
+          "kms:TagResource",
+          "kms:UntagResource",
+          "kms:ScheduleKeyDeletion",
+          "kms:CancelKeyDeletion",
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow use of the key"
+        Effect = "Allow"
+        Principal = {
+          AWS = [
+            "arn:aws:iam::${var.aws_account_number}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling",
+          ]
+        }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey",
+        ]
+        Resource = "*"
+      },
+    ]
+  })
+}
+
+resource "aws_kms_alias" "ebs_key_alias" {
+  name          = "alias/ebsKey"
+  target_key_id = aws_kms_key.ebs_key.id
+}
+
+resource "aws_kms_key" "rds_key" {
+  description             = " A symmetric KMS key for RDS"
+  deletion_window_in_days = 10
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Id      = "kms-key-for-rds"
+    Statement = [
+      {
+        Sid    = "Enable IAM User Permissions"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${var.aws_account_number}:root"
+        }
+        Action   = "kms:*"
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow access for Key Administrators"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${var.aws_account_number}:role/aws-service-role/rds.amazonaws.com/AWSServiceRoleForRDS"
+        }
+        Action = [
+          "kms:Create*",
+          "kms:Describe*",
+          "kms:Enable*",
+          "kms:List*",
+          "kms:Put*",
+          "kms:Update*",
+          "kms:Revoke*",
+          "kms:Disable*",
+          "kms:Get*",
+          "kms:Delete*",
+          "kms:TagResource",
+          "kms:UntagResource",
+          "kms:ScheduleKeyDeletion",
+          "kms:CancelKeyDeletion"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow use of the key"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${var.aws_account_number}:role/aws-service-role/rds.amazonaws.com/AWSServiceRoleForRDS"
+        }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = "arn:aws:rds:${var.region}:${var.aws_account_number}:db:*"
+      }
+    ]
+  })
+}
+
+resource "aws_kms_alias" "rds_key_alias" {
+  name          = "alias/rdsKey"
+  target_key_id = aws_kms_key.rds_key.id
 }
